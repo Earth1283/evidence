@@ -1,0 +1,24 @@
+[package]
+name = "rec"
+version = "0.1.0"
+edition = "2021"
+description = "High-fidelity microphone recorder (24-bit FLAC) with a live terminal meter"
+license = "AGPL-3.0-only"
+
+[dependencies]
+audioadapter-buffers = "5"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+cpal = "0.18"
+flacenc = { version = "0.5", default-features = false }
+fs4 = "1"
+libc = "0.2"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+rubato = "5"
+
+# Startup is dominated by page-faulting the binary in, so favour a small, fully
+# linked-in executable over incremental build speed.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

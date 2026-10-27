@@ -1,0 +1,60 @@
+name: rec
+
+on:
+  push:
+    paths: ["rec/**", ".github/workflows/rec.yml"]
+  pull_request:
+    paths: ["rec/**", ".github/workflows/rec.yml"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: rec
+
+jobs:
+  check:
+    name: fmt, clippy, test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install ALSA headers (cpal's Linux backend)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rec
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --release
+
+  macos-x86_64:
+    name: cross-compile (macOS x86_64)
+    # macos-latest is Apple Silicon, so this is a real cross-compile.
+    runs-on: macos-latest
+    env:
+      TARGET: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rec
+          key: ${{ env.TARGET }}
+      - name: Build
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Check the binary is x86_64 Mach-O
+        run: |
+          file "target/$TARGET/release/rec"
+          lipo -archs "target/$TARGET/release/rec" | grep -qx x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rec-x86_64-apple-darwin
+          path: rec/target/x86_64-apple-darwin/release/rec
+          if-no-files-found: error
