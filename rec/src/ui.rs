@@ -5,7 +5,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 pub const FLOOR_DB: f32 = -60.0;
@@ -161,14 +161,42 @@ fn panel(
     title: &'static str,
     border: Color,
     lines: Vec<Line<'static>>,
-) -> (Paragraph<'static>, u16) {
-    let height = lines.len() as u16 + 4; // border + vertical padding
+    pad: u16,
+) -> Paragraph<'static> {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(border))
         .title(Line::styled(format!(" {title} "), BOLD))
-        .padding(Padding::new(2, 2, 1, 1));
-    (Paragraph::new(lines).block(block), height)
+        .padding(Padding::new(2, 2, pad, pad));
+    Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+}
+
+/// Rows `lines` occupy once wrapped to `inner` columns.
+fn wrapped_rows(lines: &[Line<'_>], inner: usize) -> usize {
+    lines.iter().map(|l| wrapped(&l.to_string(), inner)).sum()
+}
+
+/// Shrink to fit short terminals: drop the vertical padding first, then the blank
+/// separator lines from the bottom up, so the meters stay visible as long as possible.
+fn fit(lines: &mut Vec<Line<'static>>, inner: usize, avail: u16) -> u16 {
+    let height = |lines: &[Line<'_>], pad: u16| {
+        (wrapped_rows(lines, inner) as u16).saturating_add(2 + 2 * pad)
+    };
+    let mut pad = 1;
+    if height(lines, pad) > avail {
+        pad = 0;
+    }
+    while height(lines, pad) > avail {
+        match lines.iter().rposition(|l| l.width() == 0) {
+            Some(i) => {
+                lines.remove(i);
+            }
+            None => break,
+        }
+    }
+    pad
 }
 
 fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
@@ -303,23 +331,13 @@ pub fn draw_live(f: &mut Frame, rec: &LiveState, meters: &Meters, blink_on: bool
     } else {
         Color::Yellow
     };
-    let (para, _) = panel("rec", border, lines.clone());
-    let rows: usize = lines
-        .iter()
-        .map(|l| {
-            wrapped(
-                &l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>(),
-                inner,
-            )
-        })
-        .sum();
-    let height = (rows as u16 + 4).min(f.area().height);
+    let area = f.area();
+    let pad = fit(&mut lines, inner, area.height);
+    let height = (wrapped_rows(&lines, inner) as u16 + 2 + 2 * pad).min(area.height);
+    // Inline viewports start at the cursor row, not 0, so anchor to the frame's own area.
     f.render_widget(
-        para.wrap(ratatui::widgets::Wrap { trim: false }),
-        Rect::new(0, 0, width, height),
+        panel("rec", border, lines, pad),
+        Rect::new(area.x, area.y, width, height),
     );
 }
 
@@ -401,10 +419,15 @@ pub fn summary_height(s: &Summary, width: u16) -> u16 {
 }
 
 pub fn draw_summary(f: &mut Frame, s: &Summary) {
-    let width = f.area().width.min(PANEL_WIDTH);
-    let lines = summary_lines(s, width);
-    let (para, height) = panel("saved", Color::Green, lines);
-    f.render_widget(para, Rect::new(0, 0, width, height));
+    let area = f.area();
+    let width = area.width.min(PANEL_WIDTH);
+    let mut lines = summary_lines(s, width);
+    let pad = fit(&mut lines, width.saturating_sub(6) as usize, area.height);
+    let height = (lines.len() as u16 + 2 + 2 * pad).min(area.height);
+    f.render_widget(
+        panel("saved", Color::Green, lines, pad),
+        Rect::new(area.x, area.y, width, height),
+    );
 }
 
 #[cfg(test)]
@@ -434,5 +457,93 @@ mod tests {
     #[test]
     fn bar_has_requested_width() {
         assert_eq!(meter_bar(-30.0, -10.0, 40).len(), 40);
+    }
+
+    use ratatui::backend::Backend;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    fn live_state() -> LiveState {
+        LiveState {
+            device_name: "Test Mic".into(),
+            rate: 96000,
+            channels: 1,
+            elapsed: 4.0,
+            heard_signal: true,
+            ..Default::default()
+        }
+    }
+
+    fn screen(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn short_terminals_keep_the_meters() {
+        for rows in [9u16, 10, 12, 16, 30] {
+            let mut t = Terminal::new(TestBackend::new(100, rows)).unwrap();
+            let meters = Meters::new(1);
+            t.draw(|f| draw_live(f, &live_state(), &meters, true, 1 << 30))
+                .unwrap();
+            let text = screen(&t);
+            assert!(
+                text.contains("IN "),
+                "meter row missing at {rows} rows:\n{text}"
+            );
+            assert!(
+                text.contains("dropouts"),
+                "stats row missing at {rows} rows:\n{text}"
+            );
+            assert!(text.contains("rec"), "title missing at {rows} rows");
+        }
+    }
+
+    #[test]
+    fn tall_terminals_show_everything() {
+        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| draw_live(f, &live_state(), &Meters::new(1), true, 1 << 30))
+            .unwrap();
+        assert!(screen(&t).contains("q stop & save"));
+    }
+
+    #[test]
+    fn summary_draws_inside_an_offset_inline_viewport() {
+        // The viewport starts below the cursor row; drawing at y=0 would be clipped away.
+        let mut backend = TestBackend::new(100, 24);
+        backend
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .unwrap();
+        let mut t = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(9),
+            },
+        )
+        .unwrap();
+        let sum = Summary {
+            path: "/tmp/take.flac".into(),
+            elapsed: 12.0,
+            frames: 1152000,
+            size: 1 << 20,
+            rate: 96000,
+            channels: 2,
+            clips: 0,
+            dropouts: 0,
+        };
+        t.draw(|f| draw_summary(f, &sum)).unwrap();
+        let text = screen(&t);
+        assert!(
+            text.contains("saved") && text.contains("/tmp/take.flac") && text.contains("format"),
+            "{text}"
+        );
     }
 }

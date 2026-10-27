@@ -219,7 +219,11 @@ fn run_ui(rec: &mut Recorder) -> io::Result<RawMode> {
         }
     }
     // Transient: wipe the live panel so the summary takes its place.
+    // `clear` restores the cursor to the bottom of the viewport; park it at the top so the
+    // summary lands where the panel was instead of below a blank gap.
+    let origin = terminal.get_frame().area().as_position();
     terminal.clear()?;
+    terminal.set_cursor_position(origin)?;
     result.map(|()| raw)
 }
 
